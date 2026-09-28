@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>原子スペクトル 輝線 波長 可視化ツール</title>
+<script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-900 text-gray-100 min-h-screen p-4">
+<div class="max-w-5xl mx-auto">
+  <h1 class="text-2xl font-bold text-purple-400 mb-1">原子スペクトル 輝線 波長 可視化ツール</h1>
+  <p class="text-gray-400 text-sm mb-4">原子の輝線スペクトルを可視光帯域に可視化し、量子遷移を解説します</p>
+
+  <div class="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-4">
+    <div class="bg-gray-800 rounded-lg p-4">
+      <h2 class="text-base font-semibold text-purple-300 mb-3">元素・系列選択</h2>
+      <div class="mb-3">
+        <label class="block text-xs text-gray-400 mb-1">元素</label>
+        <select id="element" onchange="updateElement()" class="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1.5 text-sm">
+          <option value="H">水素 (H)</option>
+          <option value="He">ヘリウム (He)</option>
+          <option value="Na">ナトリウム (Na)</option>
+          <option value="Hg">水銀 (Hg)</option>
+          <option value="Ne">ネオン (Ne)</option>
+          <option value="Ca">カルシウム (Ca)</option>
+        </select>
+      </div>
+      <div class="mb-3" id="seriesGroup">
+        <label class="block text-xs text-gray-400 mb-1">系列（水素のみ）</label>
+        <div class="space-y-1" id="seriesChecks"></div>
+      </div>
+
+      <h3 class="text-sm font-semibold text-purple-300 mt-4 mb-2">表示オプション</h3>
+      <label class="flex items-center gap-2 text-sm text-gray-300 mb-2">
+        <input type="checkbox" id="showLabels" checked onchange="drawSpectrum()">
+        波長ラベル表示
+      </label>
+      <label class="flex items-center gap-2 text-sm text-gray-300 mb-2">
+        <input type="checkbox" id="showNIR" onchange="drawSpectrum()">
+        NIR/UV 領域表示
+      </label>
+      <label class="flex items-center gap-2 text-sm text-gray-300">
+        <input type="checkbox" id="darkBg" checked onchange="drawSpectrum()">
+        暗視野背景
+      </label>
+
+      <div class="mt-4 bg-gray-700 rounded p-3 text-xs">
+        <p class="text-purple-300 font-semibold mb-1">リドバーグ式（水素）</p>
+        <p class="font-mono">1/λ = R∞(1/n₁² − 1/n₂²)</p>
+        <p class="mt-1">R∞ = 1.0974×10⁷ m⁻¹</p>
+      </div>
+    </div>
+
+    <div class="lg:col-span-2 space-y-4">
+      <!-- Spectrum bar -->
+      <div class="bg-gray-800 rounded-lg p-4">
+        <h2 class="text-base font-semibold text-purple-300 mb-2">可視光スペクトル (380〜780 nm)</h2>
+        <canvas id="spectrumCanvas" width="600" height="120" class="w-full rounded"></canvas>
+      </div>
+
+      <!-- Energy level diagram -->
+      <div class="bg-gray-800 rounded-lg p-4">
+        <h2 class="text-base font-semibold text-purple-300 mb-2">エネルギー準位図（水素）</h2>
+        <canvas id="energyCanvas" width="600" height="280" class="w-full rounded bg-gray-950"></canvas>
+      </div>
+    </div>
+  </div>
+
+  <!-- Line table -->
+  <div class="bg-gray-800 rounded-lg p-4 mb-4">
+    <h2 class="text-base font-semibold text-gray-300 mb-3">輝線一覧</h2>
+    <div id="lineTable" class="overflow-x-auto"></div>
+  </div>
+</div>
+
+<script>
+function escapeHtml(str){return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#039;');}
+
+const R_inf = 1.0974e7; // m^-1
+const h = 6.626e-34, c = 3e8, eV = 1.602e-19;
+
+// Wavelength to RGB (approximate)
+function wavelengthToRGB(nm) {
+  let r, g, b, factor;
+  if (nm >= 380 && nm < 440) { r = -(nm-440)/(440-380); g = 0; b = 1; }
+  else if (nm >= 440 && nm < 490) { r = 0; g = (nm-440)/(490-440); b = 1; }
+  else if (nm >= 490 && nm < 510) { r = 0; g = 1; b = -(nm-510)/(510-490); }
+  else if (nm >= 510 && nm < 580) { r = (nm-510)/(580-510); g = 1; b = 0; }
+  else if (nm >= 580 && nm < 645) { r = 1; g = -(nm-645)/(645-580); b = 0; }
+  else if (nm >= 645 && nm <= 780) { r = 1; g = 0; b = 0; }
+  else { return '#555'; }
+  if (nm >= 380 && nm < 420) factor = 0.3 + 0.7*(nm-380)/(420-380);
+  else if (nm > 700 && nm <= 780) factor = 0.3 + 0.7*(780-nm)/(780-700);
+  else factor = 1.0;
+  const to255 = (x) => Math.round(255 * Math.max(0, Math.min(1, x)) * factor);
+  return `rgb(${to255(r)},${to255(g)},${to255(b)})`;
+}
+
+// Hydrogen series
+const H_SERIES = [
+  { name: 'ライマン系列', n1: 1, color: '#c084fc', region: 'UV', checked: false },
+  { name: 'バルマー系列', n1: 2, color: '#818cf8', region: '可視光', checked: true },
+  { name: 'パッシェン系列', n1: 3, color: '#f97316', region: 'NIR', checked: false },
+  { name: 'ブラケット系列', n1: 4, color: '#f59e0b', region: 'NIR', checked: false },
+];
+
+// Non-hydrogen elements (known lines)
+const ELEMENT_LINES = {
+  He: [
+    { nm: 388.9, name: 'He 388.9', intensity: 0.6 },
+    { nm: 402.6, name: 'He 402.6', intensity: 0.5 },
+    { nm: 447.1, name: 'He 447.1', intensity: 0.9 },
+    { nm: 471.3, name: 'He 471.3', intensity: 0.4 },
+    { nm: 492.2, name: 'He 492.2', intensity: 0.5 },
+    { nm: 501.6, name: 'He 501.6', intensity: 0.7 },
+    { nm: 587.6, name: 'He 587.6 (D₃)', intensity: 1.0 },
+    { nm: 667.8, name: 'He 667.8', intensity: 0.6 },
+    { nm: 706.5, name: 'He 706.5', intensity: 0.4 },
+  ],
+  Na: [
+    { nm: 568.8, name: 'Na 568.8', intensity: 0.3 },
+    { nm: 589.0, name: 'Na D₁ 589.0', intensity: 1.0 },
+    { nm: 589.6, name: 'Na D₂ 589.6', intensity: 0.9 },
+    { nm: 616.1, name: 'Na 616.1', intensity: 0.2 },
+  ],
+  Hg: [
+    { nm: 404.7, name: 'Hg 404.7', intensity: 0.6 },
+    { nm: 407.8, name: 'Hg 407.8', intensity: 0.3 },
+    { nm: 435.8, name: 'Hg 435.8', intensity: 0.9 },
+    { nm: 546.1, name: 'Hg 546.1 (緑)', intensity: 1.0 },
+    { nm: 577.0, name: 'Hg 577.0', intensity: 0.7 },
+    { nm: 579.1, name: 'Hg 579.1', intensity: 0.8 },
+  ],
+  Ne: [
+    { nm: 585.2, name: 'Ne 585.2', intensity: 0.5 },
+    { nm: 614.3, name: 'Ne 614.3', intensity: 0.7 },
+    { nm: 640.2, name: 'Ne 640.2', intensity: 0.9 },
+    { nm: 659.9, name: 'Ne 659.9', intensity: 0.8 },
+    { nm: 692.9, name: 'Ne 692.9', intensity: 0.7 },
+    { nm: 703.2, name: 'Ne 703.2', intensity: 1.0 },
+    { nm: 724.5, name: 'Ne 724.5', intensity: 0.6 },
+  ],
+  Ca: [
+    { nm: 393.4, name: 'Ca K 393.4', intensity: 1.0 },
+    { nm: 396.8, name: 'Ca H 396.8', intensity: 0.9 },
+    { nm: 422.7, name: 'Ca 422.7', intensity: 0.7 },
+    { nm: 616.2, name: 'Ca 616.2', intensity: 0.3 },
+    { nm: 643.9, name: 'Ca 643.9', intensity: 0.4 },
+  ],
+};
+
+function getHydrogenLines() {
+  const lines = [];
+  H_SERIES.forEach(ser => {
+    const checkbox = document.querySelector(`input[data-series="${ser.name}"]`);
+    if (!checkbox || !checkbox.checked) return;
+    for (let n2 = ser.n1 + 1; n2 <= 20; n2++) {
+      const inv_lambda = R_inf * (1/(ser.n1**2) - 1/(n2**2));
+      const nm = 1e9 / inv_lambda;
+      const E_photon = h * c / (nm * 1e-9) / eV;
+      lines.push({
+        nm, intensity: 1 / ((n2 - ser.n1)**2 + 0.5),
+        name: `${ser.name} n=${n2}→${ser.n1}`,
+        series: ser.name,
+        color: ser.color,
+        n1: ser.n1, n2,
+        energy_eV: E_photon
+      });
+    }
+  });
+  return lines;
+}
+
+function getCurrentLines() {
+  const el = document.getElementById('element').value;
+  if (el === 'H') return getHydrogenLines();
+  return (ELEMENT_LINES[el] || []).map(l => ({
+    ...l, color: wavelengthToRGB(l.nm), series: el
+  }));
+}
+
+function drawSpectrum() {
+  const canvas = document.getElementById('spectrumCanvas');
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+  ctx.clearRect(0, 0, W, H);
+
+  const darkBg = document.getElementById('darkBg').checked;
+  const showNIR = document.getElementById('showNIR').checked;
+  const showLabels = document.getElementById('showLabels').checked;
+
+  const nmMin = showNIR ? 300 : 380;
+  const nmMax = showNIR ? 900 : 780;
+  const specH = 60, specY = 20;
+
+  // Draw spectrum background
+  for (let x = 0; x < W; x++) {
+    const nm = nmMin + (x / W) * (nmMax - nmMin);
+    const col = wavelengthToRGB(nm);
+    ctx.fillStyle = darkBg ? (nm >= 380 && nm <= 780 ? col : '#1a1a2e') : col;
+    ctx.fillRect(x, specY, 1, specH);
+  }
+  // Border
+  ctx.strokeStyle = '#475569'; ctx.lineWidth = 1;
+  ctx.strokeRect(0, specY, W, specH);
+
+  const lines = getCurrentLines();
+  const nmToX = nm => (nm - nmMin) / (nmMax - nmMin) * W;
+
+  lines.forEach(line => {
+    if (line.nm < nmMin || line.nm > nmMax) return;
+    const x = nmToX(line.nm);
+    const intensity = Math.min(1, line.intensity || 0.5);
+    ctx.strokeStyle = darkBg ? wavelengthToRGB(line.nm) : 'white';
+    ctx.globalAlpha = intensity;
+    ctx.lineWidth = 1.5 + intensity * 2;
+    ctx.shadowColor = wavelengthToRGB(line.nm);
+    ctx.shadowBlur = 8 * intensity;
+    ctx.beginPath(); ctx.moveTo(x, specY); ctx.lineTo(x, specY + specH); ctx.stroke();
+    ctx.globalAlpha = 1; ctx.shadowBlur = 0;
+
+    if (showLabels && intensity > 0.3) {
+      ctx.fillStyle = '#fff';
+      ctx.font = '9px monospace';
+      ctx.save();
+      ctx.translate(x, specY - 2);
+      ctx.rotate(-Math.PI/4);
+      ctx.fillText(`${line.nm.toFixed(1)}`, 0, 0);
+      ctx.restore();
+    }
+  });
+
+  // Wavelength axis labels
+  ctx.fillStyle = '#94a3b8'; ctx.font = '9px sans-serif';
+  for (let nm = Math.ceil(nmMin/50)*50; nm <= nmMax; nm += 50) {
+    const x = nmToX(nm);
+    ctx.fillText(`${nm}`, x - 10, specY + specH + 12);
+    ctx.strokeStyle = '#374151'; ctx.lineWidth = 0.5;
+    ctx.beginPath(); ctx.moveTo(x, specY + specH); ctx.lineTo(x, specY + specH + 4); ctx.stroke();
+  }
+  ctx.fillStyle = '#6b7280'; ctx.font = '10px sans-serif';
+  ctx.fillText('波長 (nm)', W/2 - 20, H - 2);
+
+  drawEnergyDiagram(lines);
+  renderLineTable(lines);
+}
+
+function drawEnergyDiagram(lines) {
+  const el = document.getElementById('element').value;
+  const canvas = document.getElementById('energyCanvas');
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = '#050810'; ctx.fillRect(0, 0, W, H);
+
+  if (el !== 'H') {
+    ctx.fillStyle = '#6b7280'; ctx.font = '14px sans-serif';
+    ctx.fillText('エネルギー準位図は水素元素のみ表示されます', 50, H/2);
+    return;
+  }
+
+  const nLevels = 7;
+  const E_n = n => -13.6 / (n * n); // eV
+  const E_min = E_n(nLevels);
+  const E_max = 0.5;
+  const leftX = 80, rightX = W - 50;
+  const topY = 30, bottomY = H - 30;
+
+  const eToY = e => topY + (1 - (e - E_min) / (E_max - E_min)) * (bottomY - topY);
+
+  // Draw levels
+  for (let n = 1; n <= nLevels; n++) {
+    const y = eToY(E_n(n));
+    ctx.strokeStyle = n <= 2 ? '#818cf8' : '#374151';
+    ctx.lineWidth = n === 1 ? 2 : 1;
+    ctx.setLineDash([]);
+    ctx.beginPath(); ctx.moveTo(leftX, y); ctx.lineTo(rightX, y); ctx.stroke();
+    ctx.fillStyle = '#94a3b8'; ctx.font = '11px monospace';
+    ctx.fillText(`n=${n}`, 8, y + 4);
+    ctx.fillText(`${E_n(n).toFixed(2)} eV`, leftX - 65, y + 4);
+  }
+  // Ionization level
+  ctx.strokeStyle = '#dc2626'; ctx.lineWidth = 1; ctx.setLineDash([4,4]);
+  ctx.beginPath(); ctx.moveTo(leftX, topY); ctx.lineTo(rightX, topY); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = '#dc2626'; ctx.font = '10px sans-serif';
+  ctx.fillText('電離 (0 eV)', leftX, topY - 5);
+
+  // Draw transitions
+  const seriesColors = {};
+  H_SERIES.forEach(s => seriesColors[s.name] = s.color);
+
+  lines.filter(l => l.n1 && l.n2 && l.nm >= 200 && l.nm <= 900).forEach(line => {
+    const y1 = eToY(E_n(line.n2));
+    const y2 = eToY(E_n(line.n1));
+    const col = line.color || '#818cf8';
+    const alpha = Math.min(1, (line.intensity || 0.5) + 0.2);
+    ctx.strokeStyle = col;
+    ctx.globalAlpha = alpha;
+    ctx.lineWidth = 1.5;
+    const x = leftX + 30 + (line.n2 - 2) * 28;
+    ctx.beginPath(); ctx.moveTo(x, y1); ctx.lineTo(x, y2);
+    // Arrow
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(x, y2);
+    ctx.lineTo(x - 4, y2 + 10);
+    ctx.lineTo(x + 4, y2 + 10);
+    ctx.closePath(); ctx.fillStyle = col; ctx.fill();
+    ctx.globalAlpha = 1;
+  });
+
+  // Series legend
+  let lx = leftX;
+  H_SERIES.forEach(s => {
+    ctx.fillStyle = s.color;
+    ctx.fillRect(lx, H - 18, 12, 12);
+    ctx.fillStyle = '#94a3b8'; ctx.font = '9px sans-serif';
+    ctx.fillText(s.name.replace('系列',''), lx + 14, H - 8);
+    lx += 100;
+  });
+}
+
+function renderLineTable(lines) {
+  const visible = lines.filter(l => l.nm >= 200 && l.nm <= 900).sort((a,b) => a.nm - b.nm);
+  if (visible.length === 0) {
+    document.getElementById('lineTable').innerHTML = '<p class="text-gray-500 text-sm">輝線なし</p>';
+    return;
+  }
+  let html = '<table class="text-xs w-full"><thead><tr class="bg-gray-700 text-gray-300">';
+  html += '<th class="px-2 py-1">波長 (nm)</th><th class="px-2 py-1">色</th><th class="px-2 py-1">系列/名称</th>';
+  const isH = document.getElementById('element').value === 'H';
+  if (isH) html += '<th class="px-2 py-1">量子数遷移</th><th class="px-2 py-1">エネルギー (eV)</th>';
+  html += '<th class="px-2 py-1">相対強度</th></tr></thead><tbody>';
+  visible.slice(0, 40).forEach(line => {
+    const col = wavelengthToRGB(line.nm);
+    const region = line.nm < 380 ? 'UV' : line.nm > 780 ? 'NIR' : '可視';
+    html += `<tr class="border-b border-gray-700">`;
+    html += `<td class="px-2 py-1 font-mono text-center">${line.nm.toFixed(1)}</td>`;
+    html += `<td class="px-2 py-1 text-center"><span style="background:${escapeHtml(col)};display:inline-block;width:20px;height:12px;border-radius:2px;"></span> ${escapeHtml(region)}</td>`;
+    html += `<td class="px-2 py-1 text-gray-300">${escapeHtml(line.series || line.name || '')}</td>`;
+    if (isH) {
+      html += `<td class="px-2 py-1 font-mono text-center">${line.n2 ? `n=${line.n2}→${line.n1}` : '—'}</td>`;
+      html += `<td class="px-2 py-1 font-mono text-center">${line.energy_eV ? line.energy_eV.toFixed(3) : '—'}</td>`;
+    }
+    html += `<td class="px-2 py-1"><div class="bg-gray-600 rounded h-2"><div class="bg-purple-400 h-2 rounded" style="width:${Math.round((line.intensity||0.5)*100)}%"></div></div></td>`;
+    html += `</tr>`;
+  });
+  html += '</tbody></table>';
+  document.getElementById('lineTable').innerHTML = html;
+}
+
+function updateElement() {
+  const el = document.getElementById('element').value;
+  const sg = document.getElementById('seriesGroup');
+  sg.style.display = el === 'H' ? 'block' : 'none';
+  drawSpectrum();
+}
+
+function initSeriesChecks() {
+  const div = document.getElementById('seriesChecks');
+  div.innerHTML = H_SERIES.map(s => `
+    <label class="flex items-center gap-2 text-xs text-gray-300">
+      <input type="checkbox" data-series="${escapeHtml(s.name)}" ${s.checked ? 'checked' : ''} onchange="drawSpectrum()" style="accent-color:${escapeHtml(s.color)}">
+      <span style="color:${escapeHtml(s.color)}">${escapeHtml(s.name)}</span>
+      <span class="text-gray-500">(${escapeHtml(s.region)})</span>
+    </label>
+  `).join('');
+}
+
+initSeriesChecks();
+drawSpectrum();
+</script>
+</body>
+</html>
